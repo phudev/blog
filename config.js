@@ -13,16 +13,7 @@ config = {
     production: {
         url: 'http://thephunami.herokuapp.com',
         fileStorage: false,
-        mail: {
-             transport: 'SMTP',
-             options: {
-                 service: 'Sendgrid',
-                 auth: {
-                  user: process.env.SENDGRID_USERNAME,
-                  pass: process.env.SENDGRID_PASSWORD
-                 }
-             }
-         },
+        mail: {},
         database: {  
           client: 'postgres',
           connection: {
