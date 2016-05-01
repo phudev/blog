@@ -1,69 +1,62 @@
 var bodyParser      = require('body-parser'),
     config          = require('../config'),
     errors          = require('../errors'),
-    express         = require('express'),
     logger          = require('morgan'),
     path            = require('path'),
     routes          = require('../routes'),
+    serveStatic     = require('express').static,
     slashes         = require('connect-slashes'),
     storage         = require('../storage'),
     passport        = require('passport'),
-    oauth2orize     = require('oauth2orize'),
     utils           = require('../utils'),
     sitemapHandler  = require('../data/xml/sitemap/handler'),
-
-    apiErrorHandlers = require('./api-error-handlers'),
-    authenticate     = require('./authenticate'),
+    multer          = require('multer'),
+    tmpdir          = require('os').tmpdir,
     authStrategies   = require('./auth-strategies'),
-    busboy           = require('./ghost-busboy'),
-    clientAuth       = require('./client-auth'),
+    auth             = require('./auth'),
     cacheControl     = require('./cache-control'),
     checkSSL         = require('./check-ssl'),
     decideIsAdmin    = require('./decide-is-admin'),
-    privateBlogging  = require('./private-blogging'),
+    oauth            = require('./oauth'),
     redirectToSetup  = require('./redirect-to-setup'),
     serveSharedFile  = require('./serve-shared-file'),
     spamPrevention   = require('./spam-prevention'),
     staticTheme      = require('./static-theme'),
-    uncapitalise     = require('./uncapitalise'),
-    oauth            = require('./oauth'),
-
     themeHandler     = require('./theme-handler'),
-    privateBlogging  = require('./private-blogging'),
+    uncapitalise     = require('./uncapitalise'),
+    cors             = require('./cors'),
+    privateBlogging  = require('../apps/private-blogging'),
 
     ClientPasswordStrategy  = require('passport-oauth2-client-password').Strategy,
     BearerStrategy          = require('passport-http-bearer').Strategy,
 
-    blogApp,
     middleware,
     setupMiddleware;
 
 middleware = {
-    busboy: busboy,
+    upload: multer({dest: tmpdir()}),
     cacheControl: cacheControl,
     spamPrevention: spamPrevention,
-    privateBlogging: privateBlogging,
+    oauth: oauth,
     api: {
-        cacheOauthServer: clientAuth.cacheOauthServer,
-        authenticateClient: clientAuth.authenticateClient,
-        generateAccessToken: clientAuth.generateAccessToken,
-        errorHandler: apiErrorHandlers.errorHandler
+        authenticateClient: auth.authenticateClient,
+        authenticateUser: auth.authenticateUser,
+        requiresAuthorizedUser: auth.requiresAuthorizedUser,
+        requiresAuthorizedUserPublicAPI: auth.requiresAuthorizedUserPublicAPI,
+        errorHandler: errors.handleAPIError,
+        cors: cors
     }
 };
 
-setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
+setupMiddleware = function setupMiddleware(blogApp, adminApp) {
     var logging = config.logging,
-        corePath = config.paths.corePath,
-        oauthServer = oauth2orize.createServer();
+        corePath = config.paths.corePath;
 
-    // silence JSHint without disabling unused check for the whole file
     passport.use(new ClientPasswordStrategy(authStrategies.clientPasswordStrategy));
     passport.use(new BearerStrategy(authStrategies.bearerStrategy));
 
-    // Cache express server instance
-    blogApp = blogAppInstance;
-    middleware.api.cacheOauthServer(oauthServer);
-    oauth.init(oauthServer, spamPrevention.resetCounter);
+    // Initialize OAuth middleware
+    oauth.init();
 
     // Make sure 'req.secure' is valid for proxied requests
     // (X-Forwarded-Proto header will be checked, if present)
@@ -81,18 +74,31 @@ setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
     // Favicon
     blogApp.use(serveSharedFile('favicon.ico', 'image/x-icon', utils.ONE_DAY_S));
 
+    // Ghost-Url
+    blogApp.use(serveSharedFile('shared/ghost-url.js', 'application/javascript', utils.ONE_HOUR_S));
+    blogApp.use(serveSharedFile('shared/ghost-url.min.js', 'application/javascript', utils.ONE_HOUR_S));
+
     // Static assets
-    blogApp.use('/shared', express['static'](path.join(corePath, '/shared'), {maxAge: utils.ONE_HOUR_MS}));
+    blogApp.use('/shared', serveStatic(
+        path.join(corePath, '/shared'),
+        {maxAge: utils.ONE_HOUR_MS, fallthrough: false}
+    ));
     blogApp.use('/content/images', storage.getStorage().serve());
-    blogApp.use('/public', express['static'](path.join(corePath, '/built/public'), {maxAge: utils.ONE_YEAR_MS}));
+    blogApp.use('/public', serveStatic(
+        path.join(corePath, '/built/public'),
+        {maxAge: utils.ONE_YEAR_MS, fallthrough: false}
+    ));
 
     // First determine whether we're serving admin or theme content
     blogApp.use(decideIsAdmin);
-    blogApp.use(themeHandler(blogApp).updateActiveTheme);
-    blogApp.use(themeHandler(blogApp).configHbsForContext);
+    blogApp.use(themeHandler.updateActiveTheme);
+    blogApp.use(themeHandler.configHbsForContext);
 
     // Admin only config
-    blogApp.use('/ghost', express['static'](config.paths.clientAssets, {maxAge: utils.ONE_YEAR_MS}));
+    blogApp.use('/ghost', serveStatic(
+        config.paths.clientAssets,
+        {maxAge: utils.ONE_YEAR_MS}
+    ));
 
     // Force SSL
     // NOTE: Importantly this is _after_ the check above for admin-theme static resources,
@@ -104,9 +110,8 @@ setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
     // Theme only config
     blogApp.use(staticTheme());
 
-    // Check if password protected blog
-    blogApp.use(privateBlogging.checkIsPrivate); // check if the blog is protected
-    blogApp.use(privateBlogging.filterPrivateRoutes);
+    // setup middleware for private blogs
+    privateBlogging.setupMiddleware(blogApp);
 
     // Serve sitemap.xsl file
     blogApp.use(serveSharedFile('sitemap.xsl', 'text/xsl', utils.ONE_DAY_S));
@@ -126,8 +131,8 @@ setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
     blogApp.use(uncapitalise);
 
     // Body parsing
-    blogApp.use(bodyParser.json());
-    blogApp.use(bodyParser.urlencoded({extended: true}));
+    blogApp.use(bodyParser.json({limit: '1mb'}));
+    blogApp.use(bodyParser.urlencoded({extended: true, limit: '1mb'}));
 
     blogApp.use(passport.initialize());
 
@@ -139,11 +144,8 @@ setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
     // API shouldn't be cached
     blogApp.use(routes.apiBaseUri, cacheControl('private'));
 
-    // enable authentication
-    blogApp.use(authenticate);
-
     // local data
-    blogApp.use(themeHandler(blogApp).ghostLocals);
+    blogApp.use(themeHandler.ghostLocals);
 
     // ### Routing
     // Set up API routes
@@ -154,8 +156,8 @@ setupMiddleware = function setupMiddleware(blogAppInstance, adminApp) {
     adminApp.use(routes.admin());
     blogApp.use('/ghost', adminApp);
 
-    // Set up Frontend routes
-    blogApp.use(routes.frontend(middleware));
+    // Set up Frontend routes (including private blogging routes)
+    blogApp.use(routes.frontend());
 
     // ### Error handling
     // 404 Handler
