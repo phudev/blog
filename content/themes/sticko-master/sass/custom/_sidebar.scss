@@ -46,8 +46,11 @@
 }
 	.author-avatar,
 	.avatar-image {@include border-radius(9999px);}
-.author-name {font-family:$font-family-bold; text-transform:uppercase; margin:1em 0 .3em}
+.author-name {font-family:$font-family-bold; text-transform:uppercase; margin:.3em 0 .3em}
 .author-bio {padding:0 10%}
+p.author-bio {
+    margin-bottom: 0;
+}
 
 .social-media-share {
 	margin-top:6%;
